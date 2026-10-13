@@ -18,6 +18,10 @@ from fraud_detection_processor.inference_client import predict
 from fraud_detection_processor.mlflow_client import get_model_parameters
 from fraud_detection_processor.payment_client import get_payment
 
+from fraud_detection_processor.notification_client import (
+    notify_fraud_detected,
+)
+
 def process_payment() -> None:
 
     from fraud_detection_database.database import Database
@@ -196,6 +200,21 @@ def process_payment() -> None:
 
             session.commit()
 
+        
+
         except Exception:
             session.rollback()
             raise
+
+        # ------------------------------------------------------------------
+    # 10. Notify Discord after successful database commit
+    # ------------------------------------------------------------------
+
+    if inference_output.fraud_prediction:
+        notify_fraud_detected(
+            transaction_id=transaction_id.int,
+            amount=float(inference_x_row["amt"]),
+            fraud_probability=float(
+                inference_output.fraud_probability
+            ),
+        )

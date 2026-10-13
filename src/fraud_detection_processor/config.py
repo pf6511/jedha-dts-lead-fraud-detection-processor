@@ -14,3 +14,5 @@ MODEL_ALIAS = environment.env_var("MODEL_ALIAS")
 WORKER_INTERVAL_SECONDS = int(
     environment.env_var("WORKER_INTERVAL_SECONDS")
 )
+
+DISCORD_FRAUD_WEBHOOK_URL = environment.env_var("DISCORD_FRAUD_WEBHOOK_URL")
