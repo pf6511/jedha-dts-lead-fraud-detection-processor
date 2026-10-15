@@ -22,6 +22,10 @@ from fraud_detection_processor.notification_client import (
     notify_fraud_detected,
 )
 
+import logging
+
+logger = logging.getLogger(__name__)
+
 def process_payment() -> None:
 
     from fraud_detection_database.database import Database
@@ -31,10 +35,14 @@ def process_payment() -> None:
     # ------------------------------------------------------------------
     payment_data = get_payment()
 
+    logger.info("Step 1.1/9 - Call payment API - Retrieving payment")
+
     payment = pd.DataFrame(
         payment_data["data"],
         columns=payment_data["columns"],
     )
+
+    logger.info("Step 1.2/9 - payment retrieved")
     if len(payment) != 1:
         raise ValueError(
             f"Expected exactly one payment, got {len(payment)}"
@@ -44,13 +52,17 @@ def process_payment() -> None:
     # 2. Extract current transaction timestamp
     # ------------------------------------------------------------------
 
+    logger.info("Step 2/9 - Extract current payment timestamp (for card history)")
     current_time = pd.to_datetime(payment.iloc[0]["current_time"], unit='ms').to_pydatetime()
 
     # ------------------------------------------------------------------
     # 3. Get active / production model parameters from MLflow
     # ------------------------------------------------------------------
+    logger.info("Step 3.1/9 - load model parameters from Mlflow")
 
     model_parameters = get_model_parameters()
+
+    logger.info("Step 3.2/9 - model parameters loaded")
 
     # ------------------------------------------------------------------
     # 4. Get previous transactions for this card
@@ -66,6 +78,8 @@ def process_payment() -> None:
     database_client = DatabaseClient()
 
     cc_num = str(payment.iloc[0]["cc_num"])
+
+    logger.info("Step 4.1/9 - Load card paiement history from DB")
     with database.SessionLocal() as session:
         history = database_client.get_card_history(
             session=session,
@@ -73,9 +87,13 @@ def process_payment() -> None:
             before=current_time,
         )
 
+    logger.info("Step 4.2/9 - card paiemnt history loaded : %d", len(history))
+
     # ------------------------------------------------------------------
     # 5. Build inference features
     # ------------------------------------------------------------------
+
+    logger.info("Step 5/9 - build inference features")
 
     inference_features = build_inference_features(
         payment=payment,
@@ -89,6 +107,8 @@ def process_payment() -> None:
     # ------------------------------------------------------------------
     # 6. Build inference API payload
     # ------------------------------------------------------------------
+
+    logger.info("Step 6/9 - build API payload / input")
 
     transaction = InferenceTransaction(
             amt = float(inference_x_row['amt']),
@@ -125,20 +145,31 @@ def process_payment() -> None:
     # 7. Call inference API
     # ------------------------------------------------------------------
 
+    logger.info("Step 7.1/9 - Call inference API")
+
     inference_output = predict( inference_input )
+
+    logger.info("Step 7.2/9 - Inference Output returned")
 
     # ------------------------------------------------------------------
     # 8. Get database model version
     # ------------------------------------------------------------------
+
+    logger.info("Step 8.1/9 - Get model version metadata from DB")
     with database.SessionLocal() as session:
         model_version = database_client.get_model_version(
             session=session,
             model_name=model_parameters.model_name,
             model_version=model_parameters.model_version,
         )
+
+    logger.info("Step 8.2/9 - Model version metadata returned")
+
   # ------------------------------------------------------------------
     # 9. Persist transaction + prediction atomically
     # ------------------------------------------------------------------
+
+    logger.info("Step 9.1/9 - Persist Transaction and Prediction to DB")
 
     transaction = Transaction(
         source_trans_num=str(inference_x_row["trans_num"]),
@@ -199,7 +230,7 @@ def process_payment() -> None:
             )
 
             session.commit()
-
+            logger.info("Step 9.2/9.2 - Transaction and Prediction persisted to DB")
         
 
         except Exception:
@@ -218,3 +249,4 @@ def process_payment() -> None:
                 inference_output.fraud_probability
             ),
         )
+        logger.info("Fraud Detected - Notification sent to thread")
