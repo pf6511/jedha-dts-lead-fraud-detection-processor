@@ -33,25 +33,30 @@ def process_payment() -> None:
     # ------------------------------------------------------------------
     # 1. Get payment from the payment API
     # ------------------------------------------------------------------
-    payment_data = get_payment()
 
     logger.info("Step 1.1/9 - Call payment API - Retrieving payment")
+    
+    payment_data = get_payment()
 
     payment = pd.DataFrame(
         payment_data["data"],
         columns=payment_data["columns"],
     )
 
-    logger.info("Step 1.2/9 - payment retrieved")
+
     if len(payment) != 1:
         raise ValueError(
             f"Expected exactly one payment, got {len(payment)}"
         )
 
+    cc_num = str(payment.iloc[0]["cc_num"])
+    logger.info("Step 1.2/9 - payment retrieved, card num : %s", cc_num)
+    
     # ------------------------------------------------------------------
     # 2. Extract current transaction timestamp
     # ------------------------------------------------------------------
 
+    
     logger.info("Step 2/9 - Extract current payment timestamp (for card history)")
     current_time = pd.to_datetime(payment.iloc[0]["current_time"], unit='ms').to_pydatetime()
 
@@ -76,8 +81,6 @@ def process_payment() -> None:
     )
 
     database_client = DatabaseClient()
-
-    cc_num = str(payment.iloc[0]["cc_num"])
 
     logger.info("Step 4.1/9 - Load card paiement history from DB")
     with database.SessionLocal() as session:
@@ -230,7 +233,7 @@ def process_payment() -> None:
             )
 
             session.commit()
-            logger.info("Step 9.2/9.2 - Transaction and Prediction persisted to DB")
+            logger.info("Step 9.2/9.2 - Transaction and Prediction persisted to DB. Transaction id: %s",transaction_id)
         
 
         except Exception:
