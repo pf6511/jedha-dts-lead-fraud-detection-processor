@@ -1,112 +1,103 @@
-from sqlalchemy import select, func
+"""Database client against the real database (fraud_detection_app role).
 
-from fraud_detection_database.database import Database
-from fraud_detection_database.environment import Environment
+The test transactions are synthetic (fictitious pseudonym, no personal
+data) and are rolled back: nothing is left in the database.
+"""
 
-from fraud_detection_database.models.transaction import Transaction
+import uuid
+from datetime import datetime, timedelta, timezone
 
+import pytest
+
+from fraud_detection_database.models import Transaction
+
+from fraud_detection_processor.config import DATABASE_URL
 from fraud_detection_processor.database_client import DatabaseClient
+from fraud_detection_processor.mlflow_client import get_model_parameters
 
-from pathlib import Path
-import pandas as pd
-from datetime import datetime, timezone
+pytestmark = pytest.mark.integration
 
-TEST_DATA_PATH = Path("tests/data/transactions_test_with_fraud.csv")
 
-def get_database_access() -> Database:
-    environment = Environment("./secrets.env")
-    return Database(
-        database_url=environment.env_var("DATABASE_URL"),
-        admin_database_url=environment.env_var("ADMIN_DATABASE_URL"),
+def synthetic_transaction(card_id: str, when: datetime, is_fraud: int) -> Transaction:
+    return Transaction(
+        source_trans_num=f"test-{uuid.uuid4().hex}",
+        trans_date_trans_time=when,
+        card_id=card_id,
+        pan_last4="0000",
+        merchant="test_merchant",
+        category="grocery_pos",
+        amt=42.0,
+        city_pop=1000,
+        state="IL",
+        job="Tester",
+        is_fraud=is_fraud,
+        received_at=datetime.now(timezone.utc),
     )
 
-def test_get_card_history():
-    df = pd.read_csv(TEST_DATA_PATH)
-    df["trans_date_trans_time"] = pd.to_datetime(
-        df["trans_date_trans_time"]
-    )
-    cc_num = df["cc_num"].iloc[0]
 
-    sample = (
-        df[df["cc_num"] == cc_num]
-        .sort_values("trans_date_trans_time")
-        .head(3)
-    )
+def test_get_card_history_by_pseudonym():
+    database_client = DatabaseClient(DATABASE_URL)
 
-    assert len(sample) == 3
-
+    # Random pseudonym: cannot collide with a real card
+    card_id = uuid.uuid4().hex + uuid.uuid4().hex
+    start = datetime(2030, 1, 1, 12, 0)
     transactions = [
-        Transaction(
-            source_trans_num=str(row["trans_num"]),
-            trans_date_trans_time=row["trans_date_trans_time"],
-            cc_num=cc_num,
-            merchant=str(row["merchant"]),
-            category=str(row["category"]),
-            amt=float(row["amt"]),
-            first=str(row["first"]),
-            last=str(row["last"]),
-            gender=str(row["gender"]),
-            street=str(row["street"]),
-            city=str(row["city"]),
-            state=str(row["state"]),
-            zip=int(row["zip"]),
-            lat=float(row["lat"]),
-            long=float(row["long"]),
-            city_pop=int(row["city_pop"]),
-            job=str(row["job"]),
-            dob=pd.to_datetime(row["dob"]).date(),
-            merch_lat=float(row["merch_lat"]),
-            merch_long=float(row["merch_long"]),
-            is_fraud=int(row["is_fraud"]),
-            received_at=datetime.now(timezone.utc),
-        )
-        for _, row in sample.iterrows()
+        synthetic_transaction(card_id, start + timedelta(hours=hours), is_fraud)
+        for hours, is_fraud in [(0, 0), (1, 1), (2, 0)]
     ]
 
-    database_client = DatabaseClient()
+    with database_client.SessionLocal() as session:
+        try:
+            for transaction in transactions:
+                database_client.insert_transaction(session=session, transaction=transaction)
 
-    with get_database_access().SessionLocal() as session:
-        for transaction in transactions:
-                database_client.insert_transaction(
-                    session=session,
-                    transaction=transaction,
+            history = database_client.get_card_history(
+                session,
+                card_id=card_id,
+                before=transactions[-1].trans_date_trans_time,
             )
-                
+
+            # Strictly before the last one
+            assert len(history) == 2
+            assert list(history.columns) == [
+                "card_id",
+                "amt",
+                "is_fraud",
+                "trans_date_trans_time",
+            ]
+            assert (history["card_id"] == card_id).all()
+            assert history["trans_date_trans_time"].is_monotonic_increasing
+            assert history["is_fraud"].sum() == 1
+
+        finally:
+            session.rollback()
+
+
+def test_unknown_card_has_empty_history():
+    database_client = DatabaseClient(DATABASE_URL)
+
+    with database_client.SessionLocal() as session:
         history = database_client.get_card_history(
             session,
-            cc_num=cc_num,
-            before=transactions[-1].trans_date_trans_time,
+            card_id="0" * 64,
+            before=datetime(2030, 1, 1),
         )
 
-        assert len(history) == 2
-        assert list(history.columns) == [
-            "cc_num",
-            "amt",
-            "is_fraud",
-            "trans_date_trans_time",
-        ]
-
-        assert all(
-            history["cc_num"] == cc_num
-        )
-
-        assert all(
-            history["trans_date_trans_time"]
-            < transactions[-1].trans_date_trans_time
-        )
-
-        assert history["trans_date_trans_time"].is_monotonic_increasing
-        session.rollback()
+    assert history.empty
+    assert "is_fraud" in history.columns
 
 
-def test_get_model_version():
-    with get_database_access().SessionLocal() as session:
-        database_client = DatabaseClient()
+def test_production_model_is_registered_in_database():
+    """The model carrying the alias must exist in model_versions."""
+    model_parameters = get_model_parameters()
+    database_client = DatabaseClient(DATABASE_URL)
+
+    with database_client.SessionLocal() as session:
         model = database_client.get_model_version(
             session=session,
-            model_name="fraud-detection-random-forest",
-            model_version="2",
+            model_name=model_parameters.model_name,
+            model_version=model_parameters.model_version,
         )
 
-        assert model is not None
-        assert model.model_name == "fraud-detection-random-forest"       
+    assert model.model_name == model_parameters.model_name
+    assert model.model_version == model_parameters.model_version

@@ -1,255 +1,181 @@
+"""Processing of one payment, from the payment API to the database.
+
+Personal data stops at step 1: everything after works on the minimised
+payment (card_id, no name, address, date of birth, gender or
+coordinates). Logs never contain the card number.
+"""
+
+import logging
 from datetime import datetime, timezone
 
-import pandas as pd
-
-from fraud_detection_database.models.prediction import Prediction
-from fraud_detection_database.models.transaction import Transaction
-
+from fraud_detection_database.models import Prediction, Transaction
 from fraud_detection_features.features import build_inference_features
 
-from fraud_detection_contracts.inference import (
-    CardFeatures,
-    FraudDetectionInferenceInput,
-    Transaction as InferenceTransaction,
-)
-
+from fraud_detection_processor.config import CARD_ID_KEY
 from fraud_detection_processor.database_client import DatabaseClient
 from fraud_detection_processor.inference_client import predict
 from fraud_detection_processor.mlflow_client import get_model_parameters
+from fraud_detection_processor.notification_client import notify_fraud_detected
 from fraud_detection_processor.payment_client import get_payment
-
-from fraud_detection_processor.notification_client import (
-    notify_fraud_detected,
+from fraud_detection_processor.payment_preparation import (
+    build_inference_input,
+    prepare_payment,
 )
-
-import logging
 
 logger = logging.getLogger(__name__)
 
-def process_payment() -> None:
 
-    from fraud_detection_database.database import Database
-    from fraud_detection_database.environment import Environment
+def process_payment(database_client: DatabaseClient) -> None:
+
     # ------------------------------------------------------------------
-    # 1. Get payment from the payment API
+    # 1. Get the payment and minimise it immediately
     # ------------------------------------------------------------------
+    logger.info("Step 1/8 - Retrieve payment and minimise personal data")
 
-    logger.info("Step 1.1/9 - Call payment API - Retrieving payment")
-    
-    payment_data = get_payment()
+    prepared_payment = prepare_payment(get_payment(), CARD_ID_KEY)
+    row = prepared_payment.payment.iloc[0]
 
-    payment = pd.DataFrame(
-        payment_data["data"],
-        columns=payment_data["columns"],
+    logger.info(
+        "Step 1/8 - Payment %s minimised (%d columns removed: %s)",
+        row["trans_num"],
+        len(prepared_payment.dropped_columns),
+        ", ".join(prepared_payment.dropped_columns),
     )
 
-
-    if len(payment) != 1:
-        raise ValueError(
-            f"Expected exactly one payment, got {len(payment)}"
-        )
-
-    cc_num = str(payment.iloc[0]["cc_num"])
-    logger.info("Step 1.2/9 - payment retrieved, card num : %s", cc_num)
-    
     # ------------------------------------------------------------------
-    # 2. Extract current transaction timestamp
+    # 2. Parameters of the production model (MLflow)
     # ------------------------------------------------------------------
-
-    
-    logger.info("Step 2/9 - Extract current payment timestamp (for card history)")
-    current_time = pd.to_datetime(payment.iloc[0]["current_time"], unit='ms').to_pydatetime()
-
-    # ------------------------------------------------------------------
-    # 3. Get active / production model parameters from MLflow
-    # ------------------------------------------------------------------
-    logger.info("Step 3.1/9 - load model parameters from Mlflow")
+    logger.info("Step 2/8 - Load model parameters from MLflow")
 
     model_parameters = get_model_parameters()
 
-    logger.info("Step 3.2/9 - model parameters loaded")
-
     # ------------------------------------------------------------------
-    # 4. Get previous transactions for this card
+    # 3. Card history, by pseudonym, strictly before the payment
     # ------------------------------------------------------------------
+    logger.info("Step 3/8 - Load card history")
 
-    environment = Environment("./secrets.env")
-
-    database = Database(
-        database_url=environment.env_var("DATABASE_URL"),
-        admin_database_url=environment.env_var("ADMIN_DATABASE_URL"),
-    )
-
-    database_client = DatabaseClient()
-
-    logger.info("Step 4.1/9 - Load card paiement history from DB")
-    with database.SessionLocal() as session:
+    with database_client.SessionLocal() as session:
         history = database_client.get_card_history(
             session=session,
-            cc_num=cc_num,
-            before=current_time,
+            card_id=row["card_id"],
+            before=prepared_payment.transaction_time,
         )
 
-    logger.info("Step 4.2/9 - card paiemnt history loaded : %d", len(history))
+    logger.info("Step 3/8 - Card history loaded: %d transactions", len(history))
 
     # ------------------------------------------------------------------
-    # 5. Build inference features
+    # 4. Features and API payload
     # ------------------------------------------------------------------
+    logger.info("Step 4/8 - Build inference features and payload")
 
-    logger.info("Step 5/9 - build inference features")
-
-    inference_features = build_inference_features(
-        payment=payment,
+    features = build_inference_features(
+        payment=prepared_payment.payment,
         history=history,
         p0=model_parameters.p0,
         alpha=model_parameters.alpha,
-    )   
-
-    inference_x_row = inference_features.iloc[0]
-
-    # ------------------------------------------------------------------
-    # 6. Build inference API payload
-    # ------------------------------------------------------------------
-
-    logger.info("Step 6/9 - build API payload / input")
-
-    transaction = InferenceTransaction(
-            amt = float(inference_x_row['amt']),
-            lat=float(inference_x_row["lat"]),
-            long=float(inference_x_row["long"]),
-            city_pop=int(inference_x_row["city_pop"]),
-            merch_lat=float(inference_x_row["merch_lat"]),
-            merch_long=float(inference_x_row["merch_long"]),
-            merchant=str(inference_x_row["merchant"]),
-            category=str(inference_x_row["category"]),
-            gender=str(inference_x_row["gender"]),
-            state=str(inference_x_row["state"]),
-            job=str(inference_x_row["job"])       
     )
+    features_row = features.iloc[0]
 
-    card_avg_amount = inference_x_row["card_avg_amount"]
-
-    card_features = CardFeatures(
-            distance_km=float(inference_x_row["distance_km"]),
-            card_transaction_count=int(inference_x_row["card_transaction_count"]),
-            card_fraud_count=int(inference_x_row["card_fraud_count"]),
-            card_fraud_rate=float(inference_x_row["card_fraud_rate"]),
-            card_avg_amount=(
-                    None
-                    if pd.isna(card_avg_amount)
-                    else float(card_avg_amount)
-                ),
-    )
-
-    inference_input = FraudDetectionInferenceInput(transaction=transaction, card_features=card_features)
-
+    inference_input = build_inference_input(features_row)
 
     # ------------------------------------------------------------------
-    # 7. Call inference API
+    # 5. Inference API
     # ------------------------------------------------------------------
+    logger.info("Step 5/8 - Call inference API")
 
-    logger.info("Step 7.1/9 - Call inference API")
+    inference_output = predict(inference_input)
 
-    inference_output = predict( inference_input )
-
-    logger.info("Step 7.2/9 - Inference Output returned")
-
-    # ------------------------------------------------------------------
-    # 8. Get database model version
-    # ------------------------------------------------------------------
-
-    logger.info("Step 8.1/9 - Get model version metadata from DB")
-    with database.SessionLocal() as session:
-        model_version = database_client.get_model_version(
-            session=session,
-            model_name=model_parameters.model_name,
-            model_version=model_parameters.model_version,
+    # p0 and alpha must come from the model that actually scored:
+    # if the alias moved between steps 2 and 5, the payment is rejected.
+    if inference_output.model_version != model_parameters.model_version:
+        raise RuntimeError(
+            f"Model mismatch: features built for version {model_parameters.model_version}, "
+            f"predicted by version {inference_output.model_version} "
+            "(alias moved; restart the inference API)"
         )
 
-    logger.info("Step 8.2/9 - Model version metadata returned")
+    logger.info(
+        "Step 5/8 - Predicted by %s version %s: probability %.4f",
+        inference_output.model_name,
+        inference_output.model_version,
+        inference_output.fraud_probability,
+    )
 
-  # ------------------------------------------------------------------
-    # 9. Persist transaction + prediction atomically
     # ------------------------------------------------------------------
+    # 6. Model version registered in the database
+    # ------------------------------------------------------------------
+    logger.info("Step 6/8 - Get model version metadata from DB")
 
-    logger.info("Step 9.1/9 - Persist Transaction and Prediction to DB")
+    with database_client.SessionLocal() as session:
+        model_version = database_client.get_model_version(
+            session=session,
+            model_name=inference_output.model_name,
+            model_version=inference_output.model_version,
+        )
+
+    # ------------------------------------------------------------------
+    # 7. Persist transaction + prediction atomically
+    # ------------------------------------------------------------------
+    logger.info("Step 7/8 - Persist transaction and prediction")
 
     transaction = Transaction(
-        source_trans_num=str(inference_x_row["trans_num"]),
-        trans_date_trans_time=current_time,
-        cc_num=cc_num,
-        merchant=str(inference_x_row["merchant"]),
-        category=str(inference_x_row["category"]),
-        amt=float(inference_x_row["amt"]),
-        first=str(inference_x_row["first"]),
-        last=str(inference_x_row["last"]),
-        gender=str(inference_x_row["gender"]),
-        street=str(inference_x_row["street"]),
-        city=str(inference_x_row["city"]),
-        state=str(inference_x_row["state"]),
-        zip=int(inference_x_row["zip"]),
-        lat=float(inference_x_row["lat"]),
-        long=float(inference_x_row["long"]),
-        city_pop=int(inference_x_row["city_pop"]),
-        job=str(inference_x_row["job"]),
-        dob=pd.to_datetime(inference_x_row["dob"]).date(),
-        merch_lat=float(inference_x_row["merch_lat"]),
-        merch_long=float(inference_x_row["merch_long"]),
-        is_fraud=int(inference_x_row["is_fraud"]),
+        source_trans_num=str(row["trans_num"]),
+        trans_date_trans_time=prepared_payment.transaction_time,
+        card_id=str(row["card_id"]),
+        pan_last4=prepared_payment.pan_last4,
+        merchant=str(row["merchant"]),
+        category=str(row["category"]),
+        amt=float(row["amt"]),
+        city_pop=int(row["city_pop"]),
+        state=str(row["state"]),
+        job=str(row["job"]),
+        is_fraud=int(row["is_fraud"]),
         received_at=datetime.now(timezone.utc),
     )
 
-    with database.SessionLocal() as session:
+    with database_client.SessionLocal() as session:
         try:
             transaction_id = database_client.insert_transaction(
                 session=session,
                 transaction=transaction,
             )
 
+            card_features = inference_input.card_features
+
             prediction = Prediction(
                 transaction_id=transaction_id,
                 model_version_id=model_version.model_version_id,
                 fraud_probability=inference_output.fraud_probability,
                 fraud_prediction=inference_output.fraud_prediction,
-                ground_truth=int(inference_x_row["is_fraud"]),
-                distance_km=float(inference_x_row["distance_km"]),
-                card_transaction_count=int(
-                    inference_x_row["card_transaction_count"]
-                ),
-                card_fraud_count=int(
-                    inference_x_row["card_fraud_count"]
-                ),
-                card_fraud_rate=float(
-                    inference_x_row["card_fraud_rate"]
-                ),
-                card_avg_amount=float(
-                    inference_x_row["card_avg_amount"]
-                ),
+                ground_truth=int(row["is_fraud"]),
+                # Snapshot of the features sent to inference api so to the model for prediction
+                distance_km=card_features.distance_km,
+                card_transaction_count=card_features.card_transaction_count,
+                card_fraud_count=card_features.card_fraud_count,
+                card_fraud_rate=card_features.card_fraud_rate,
             )
 
-            database_client.insert_prediction(
-                session=session,
-                prediction=prediction,
-            )
+            database_client.insert_prediction(session=session, prediction=prediction)
 
             session.commit()
-            logger.info("Step 9.2/9.2 - Transaction and Prediction persisted to DB. Transaction id: %s",transaction_id)
-        
 
         except Exception:
             session.rollback()
             raise
 
-        # ------------------------------------------------------------------
-    # 10. Notify Discord after successful database commit
-    # ------------------------------------------------------------------
+    logger.info("Step 7/8 - Persisted, transaction id %s", transaction_id)
 
+    # ------------------------------------------------------------------
+    # 8. Discord alert, after the commit
+    # ------------------------------------------------------------------
     if inference_output.fraud_prediction:
-        notify_fraud_detected(
-            transaction_id=transaction_id.int,
-            amount=float(inference_x_row["amt"]),
-            fraud_probability=float(
-                inference_output.fraud_probability
-            ),
+        sent = notify_fraud_detected(
+            transaction_id=str(transaction_id),
+            pan_last4=prepared_payment.pan_last4,
+            amount=float(row["amt"]),
+            fraud_probability=inference_output.fraud_probability,
+            model_version=inference_output.model_version,
         )
-        logger.info("Fraud Detected - Notification sent to thread")
+        logger.info("Step 8/8 - Fraud detected, alert sent: %s", sent)
+    else:
+        logger.info("Step 8/8 - No fraud detected, no alert")

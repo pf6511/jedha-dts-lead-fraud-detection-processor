@@ -785,7 +785,7 @@ wheels = [
 
 [[package]]
 name = "fraud-detection-contracts"
-version = "0.1.0"
+version = "0.2.0"
 source = { editable = "fraud-detection-contracts" }
 dependencies = [
     { name = "pydantic" },
@@ -799,7 +799,7 @@ dev = [{ name = "pytest", specifier = ">=9.1.1" }]
 
 [[package]]
 name = "fraud-detection-database"
-version = "0.1.0"
+version = "0.2.0"
 source = { directory = "../fraud-detection-database" }
 dependencies = [
     { name = "numpy" },
@@ -823,17 +823,19 @@ dev = [{ name = "pytest", specifier = ">=9.1.1" }]
 
 [[package]]
 name = "fraud-detection-features"
-version = "0.1.0"
+version = "0.2.0"
 source = { editable = "../fraud-detection-features" }
 dependencies = [
     { name = "numpy" },
     { name = "pandas" },
+    { name = "python-dotenv" },
 ]
 
 [package.metadata]
 requires-dist = [
     { name = "numpy", specifier = ">=2.5.3" },
     { name = "pandas", specifier = ">=3.0.6" },
+    { name = "python-dotenv", specifier = ">=1.2.4" },
 ]
 
 [package.metadata.requires-dev]
@@ -841,7 +843,7 @@ dev = [{ name = "pytest", specifier = ">=9.1.1" }]
 
 [[package]]
 name = "fraud-detection-processor"
-version = "0.1.0"
+version = "0.2.0"
 source = { editable = "." }
 dependencies = [
     { name = "fraud-detection-contracts" },
