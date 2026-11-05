@@ -1,19 +1,25 @@
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 
 import pandas as pd
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session, sessionmaker
 
-from fraud_detection_database.models import ModelVersion, Prediction, Transaction
+from fraud_detection_database.models import (
+    FailedPayment,
+    ModelVersion,
+    Prediction,
+    QuarantinedPayment,
+    Transaction,
+)
 
 
 class DatabaseClient:
     """Database access of the processor.
 
     The engine is created once for the worker's lifetime, with the
-    fraud_detection_app role only (SELECT, INSERT): the processor never
-    needs the admin role.
+    fraud_detection_app role only: the processor never needs the admin
+    role.
     """
 
     def __init__(self, database_url: str):
@@ -23,6 +29,17 @@ class DatabaseClient:
             autoflush=False,
             expire_on_commit=False,
         )
+
+    # -----------------------------------------------------------------
+    # Transactions and predictions
+    # -----------------------------------------------------------------
+
+    def transaction_exists(self, session: Session, source_trans_num: str) -> bool:
+        """Deduplication: has this payment already been stored?"""
+        statement = select(Transaction.transaction_id).where(
+            Transaction.source_trans_num == source_trans_num
+        )
+        return session.scalar(statement) is not None
 
     def get_card_history(
         self,
@@ -90,3 +107,58 @@ class DatabaseClient:
         session.add(prediction)
         session.flush()
         return prediction.prediction_id
+
+    # -----------------------------------------------------------------
+    # Quarantine and failed payments
+    # -----------------------------------------------------------------
+
+    def insert_quarantined_payment(self, session: Session, quarantined: QuarantinedPayment) -> None:
+        session.add(quarantined)
+
+    def save_failure(
+        self,
+        session: Session,
+        source_trans_num: str,
+        payload: dict,
+        failed_step: str,
+        error: str,
+    ) -> None:
+        """Store a failed payment; if it already failed, count one more attempt."""
+        failure = session.scalar(
+            select(FailedPayment).where(FailedPayment.source_trans_num == source_trans_num)
+        )
+
+        if failure is None:
+            session.add(
+                FailedPayment(
+                    source_trans_num=source_trans_num,
+                    payload=payload,
+                    failed_step=failed_step,
+                    error=error,
+                )
+            )
+        else:
+            failure.attempts += 1
+            failure.failed_step = failed_step
+            failure.error = error
+            failure.failed_at = datetime.now(timezone.utc)
+
+    def get_pending_failures(self, session: Session) -> list[FailedPayment]:
+        statement = (
+            select(FailedPayment)
+            .where(FailedPayment.status == "pending")
+            .order_by(FailedPayment.failed_at.asc())
+        )
+        return list(session.scalars(statement).all())
+
+    def mark_replayed(self, session: Session, source_trans_num: str) -> None:
+        """Close the failure of a payment, if there is one."""
+        failure = session.scalar(
+            select(FailedPayment).where(
+                FailedPayment.source_trans_num == source_trans_num,
+                FailedPayment.status == "pending",
+            )
+        )
+        if failure is not None:
+            failure.status = "replayed"
+            failure.replayed_at = datetime.now(timezone.utc)

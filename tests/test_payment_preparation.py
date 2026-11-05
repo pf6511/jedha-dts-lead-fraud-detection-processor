@@ -11,31 +11,12 @@ from fraud_detection_features.privacy import KEPT_COLUMNS, pseudonymize_card_num
 
 from fraud_detection_processor.payment_preparation import (
     build_inference_input,
+    payload_to_payment,
+    payment_to_payload,
     prepare_payment,
 )
 
-KEY = b"k" * 32
-CARD_NUMBER = "4000123412341234"   # fake card number
-
-PERSONAL_COLUMNS = [
-    "cc_num", "first", "last", "street", "city", "zip", "dob",
-    "gender", "lat", "long", "merch_lat", "merch_long",
-]
-
-
-def payment_api_response(rows: int = 1) -> dict:
-    """Same shape as the payment API: pandas 'split' orientation."""
-    columns = [
-        "cc_num", "merchant", "category", "amt", "first", "last", "gender",
-        "street", "city", "state", "zip", "lat", "long", "city_pop", "job",
-        "dob", "trans_num", "merch_lat", "merch_long", "is_fraud", "current_time",
-    ]
-    row = [
-        CARD_NUMBER, "fraud_Kilback LLC", "grocery_pos", 120.5, "Jane", "Doe", "F",
-        "1 Main Street", "Springfield", "IL", 62701, 39.78, -89.65, 116250,
-        "Teacher", "1980-01-01", "abc123", 39.90, -89.50, 0, 1730736000000,
-    ]
-    return {"columns": columns, "data": [row] * rows}
+from payment_samples import CARD_NUMBER, KEY, PERSONAL_COLUMNS, payment_api_response
 
 
 def test_minimised_payment_contains_no_personal_data():
@@ -72,20 +53,16 @@ def test_more_than_one_payment_is_rejected():
 
 
 def test_payment_without_card_number_is_rejected():
-    response = payment_api_response()
-    index = response["columns"].index("cc_num")
-    response["columns"].pop(index)
-    response["data"] = [row[:index] + row[index + 1:] for row in response["data"]]
-
     with pytest.raises(ValueError, match="cc_num"):
-        prepare_payment(response, KEY)
+        prepare_payment(payment_api_response(drop=("cc_num",)), KEY)
 
 
 def test_inference_payload_follows_the_contract_without_personal_data():
     prepared = prepare_payment(payment_api_response(), KEY)
+    card_id = prepared.payment.iloc[0]["card_id"]
     history = pd.DataFrame(
         {
-            "card_id": [prepared.payment.iloc[0]["card_id"]] * 2,
+            "card_id": [card_id] * 2,
             "amt": [10.0, 20.0],
             "is_fraud": [0, 1],
             "trans_date_trans_time": pd.to_datetime(["2024-11-01", "2024-11-02"]),
@@ -99,7 +76,22 @@ def test_inference_payload_follows_the_contract_without_personal_data():
     assert payload.card_features.card_fraud_count == 1
 
     sent = json.dumps(payload.model_dump())
-    assert CARD_NUMBER not in sent
-    assert prepared.payment.iloc[0]["card_id"] not in sent
+    assert str(CARD_NUMBER) not in sent
+    assert card_id not in sent
     for column in PERSONAL_COLUMNS:
         assert f'"{column}"' not in sent
+
+
+def test_failed_payment_can_be_stored_and_rebuilt():
+    prepared = prepare_payment(payment_api_response(), KEY)
+
+    payload = payment_to_payload(prepared)
+    stored = json.dumps(payload)             # what goes to the JSONB column
+    assert str(CARD_NUMBER) not in stored
+
+    rebuilt = payload_to_payment(json.loads(stored))
+
+    assert rebuilt.transaction_time == prepared.transaction_time
+    assert rebuilt.pan_last4 == "1234"
+    assert rebuilt.payment.iloc[0]["card_id"] == prepared.payment.iloc[0]["card_id"]
+    assert set(rebuilt.payment.columns) == set(prepared.payment.columns)

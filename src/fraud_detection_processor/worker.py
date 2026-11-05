@@ -15,8 +15,9 @@ def run_worker() -> None:
         WORKER_INTERVAL_SECONDS,
     )
 
-    # Fail fast: an incompatible production model stops the worker
-    # at startup instead of failing on every payment.
+    # Read once: p0, alpha and version of the production model. Also a
+    # startup check: an incompatible model (feature set) stops the worker.
+    # After a change of the production alias, restart the worker.
     model_parameters = get_model_parameters()
     logger.info(
         "Production model: %s version %s (feature set %s)",
@@ -29,9 +30,10 @@ def run_worker() -> None:
 
     while True:
         try:
-            process_payment(database_client)
-            logger.info("Payment processed successfully")
+            outcome = process_payment(database_client, model_parameters)
+            logger.info("Cycle outcome: %s", outcome)
         except Exception:
+            # e.g. payment API unavailable: nothing received, nothing lost
             logger.exception("Payment processing failed")
 
         time.sleep(WORKER_INTERVAL_SECONDS)

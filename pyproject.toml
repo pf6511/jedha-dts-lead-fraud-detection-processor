@@ -1,6 +1,6 @@
 [project]
 name = "fraud-detection-processor"
-version = "0.2.0"
+version = "0.3.0"
 description = "Real-time worker: minimises each payment, builds the card features, calls the inference API and stores the result"
 readme = "README.md"
 authors = [
@@ -21,6 +21,7 @@ dependencies = [
 
 [project.scripts]
 fraud-detection-processor = "fraud_detection_processor:main"
+fraud-detection-replay = "fraud_detection_processor.replay:main"
 
 [build-system]
 requires = ["uv_build>=0.12.19,<0.13.0"]

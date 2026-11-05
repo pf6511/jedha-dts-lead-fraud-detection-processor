@@ -8,8 +8,9 @@ import uuid
 from datetime import datetime, timedelta, timezone
 
 import pytest
+from sqlalchemy import select
 
-from fraud_detection_database.models import Transaction
+from fraud_detection_database.models import FailedPayment, QuarantinedPayment, Transaction
 
 from fraud_detection_processor.config import DATABASE_URL
 from fraud_detection_processor.database_client import DatabaseClient
@@ -101,3 +102,51 @@ def test_production_model_is_registered_in_database():
 
     assert model.model_name == model_parameters.model_name
     assert model.model_version == model_parameters.model_version
+
+
+
+def test_failure_is_saved_counted_then_replayed():
+    database_client = DatabaseClient(DATABASE_URL)
+    trans_num = f"test-{uuid.uuid4().hex}"
+    payload = {"trans_num": trans_num, "pan_last4": "0000"}
+
+    with database_client.SessionLocal() as session:
+        try:
+            database_client.save_failure(session, trans_num, payload, "inference_api", "ReadTimeout")
+            session.flush()
+            database_client.save_failure(session, trans_num, payload, "persistence", "OperationalError")
+            session.flush()
+
+            failure = session.scalar(
+                select(FailedPayment).where(FailedPayment.source_trans_num == trans_num)
+            )
+            assert failure.attempts == 2
+            assert failure.failed_step == "persistence"
+            assert failure.status == "pending"
+            assert trans_num in {f.source_trans_num for f in database_client.get_pending_failures(session)}
+
+            database_client.mark_replayed(session, trans_num)
+            session.flush()
+            assert failure.status == "replayed"
+            assert failure.replayed_at is not None
+
+        finally:
+            session.rollback()
+
+
+def test_quarantined_payment_is_stored():
+    database_client = DatabaseClient(DATABASE_URL)
+    quarantined = QuarantinedPayment(
+        source_trans_num=None,
+        payload={"amt": -5},
+        reason="amt: Input should be greater than 0",
+    )
+
+    with database_client.SessionLocal() as session:
+        try:
+            database_client.insert_quarantined_payment(session, quarantined)
+            session.flush()
+            assert quarantined.quarantine_id is not None
+
+        finally:
+            session.rollback()

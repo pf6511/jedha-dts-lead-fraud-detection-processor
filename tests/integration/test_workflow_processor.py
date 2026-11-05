@@ -15,6 +15,7 @@ from fraud_detection_database.models import ModelVersion, Prediction, Transactio
 
 from fraud_detection_processor.config import DATABASE_URL
 from fraud_detection_processor.database_client import DatabaseClient
+from fraud_detection_processor.mlflow_client import get_model_parameters
 from fraud_detection_processor.workflow_processor import process_payment
 
 pytestmark = pytest.mark.integration
@@ -33,7 +34,11 @@ def test_process_payment():
         prediction_count_before = count(session, Prediction)
 
     # Act
-    process_payment(database_client)
+    outcome = process_payment(database_client, get_model_parameters())
+
+    # Another outcome (quarantined, duplicate, failed) is a legitimate
+    # behaviour, but not the one this test checks
+    assert outcome == "processed", f"cycle outcome: {outcome}"
 
     # Assert
     with database_client.SessionLocal() as session:
