@@ -806,7 +806,7 @@ dev = [{ name = "pytest", specifier = ">=9.1.1" }]
 
 [[package]]
 name = "fraud-detection-database"
-version = "0.3.0"
+version = "0.4.0"
 source = { directory = "../fraud-detection-database" }
 dependencies = [
     { name = "numpy" },
@@ -850,7 +850,7 @@ dev = [{ name = "pytest", specifier = ">=9.1.1" }]
 
 [[package]]
 name = "fraud-detection-processor"
-version = "0.3.0"
+version = "0.3.1"
 source = { editable = "." }
 dependencies = [
     { name = "fraud-detection-contracts" },

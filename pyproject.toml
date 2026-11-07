@@ -1,6 +1,6 @@
 [project]
 name = "fraud-detection-processor"
-version = "0.3.0"
+version = "0.3.1"
 description = "Real-time worker: minimises each payment, builds the card features, calls the inference API and stores the result"
 readme = "README.md"
 authors = [

@@ -20,7 +20,7 @@ class RawPayment(BaseModel):
     """Fields of the raw payment used by the pipeline, with their rules."""
 
     trans_num: str = Field(min_length=1)
-    cc_num: int = Field(ge=10**11, lt=10**19)       # 12 to 19 digits
+    cc_num: int = Field(ge=10**7, lt=10**19)       # 8 to 19 digits
     current_time: int = Field(gt=0)                  # epoch, milliseconds
 
     amt: float = Field(gt=0)

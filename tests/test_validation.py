@@ -55,3 +55,6 @@ def test_quarantine_payload_has_no_personal_data():
     assert str(CARD_NUMBER) not in str(payload)
     assert payload["amt"] == -5
     assert payload["trans_num"] == "abc123"
+
+def test_eleven_digit_card_number_is_valid():
+    assert validate_payment(payment_api_response(cc_num=60416207185)) == []
