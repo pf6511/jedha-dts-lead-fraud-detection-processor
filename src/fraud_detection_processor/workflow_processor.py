@@ -121,7 +121,7 @@ def process_minimised_payment(
     step = "features"
     try:
         # 5. Card history and features
-        inference_input = build_payload(prepared, database_client, model_parameters)
+        inference_input = build_inference_payload(prepared, database_client, model_parameters)
 
         # 6. Inference API
         step = "inference_api"
@@ -129,7 +129,7 @@ def process_minimised_payment(
 
         # 7. Transaction and prediction in the database
         step = "persistence"
-        transaction_id = store_prediction(
+        transaction_id = store_transaction_and_prediction(
             prepared, inference_input, inference_output, database_client
         )
 
@@ -156,7 +156,7 @@ def is_duplicate(prepared: PreparedPayment, database_client: DatabaseClient) -> 
     return duplicate
 
 
-def build_payload(
+def build_inference_payload(
     prepared: PreparedPayment,
     database_client: DatabaseClient,
     model_parameters: ModelParameters,
@@ -210,7 +210,7 @@ def get_prediction(
     return inference_output
 
 
-def store_prediction(
+def store_transaction_and_prediction(
     prepared: PreparedPayment,
     inference_input: FraudDetectionInferenceInput,
     inference_output: FraudDetectionInferenceOutput,
@@ -266,7 +266,7 @@ def store_prediction(
                 ),
             )
 
-            database_client.mark_replayed(session, str(row["trans_num"]))
+            database_client.mark_pending_failure_replayed(session, str(row["trans_num"]))
 
             session.commit()
 

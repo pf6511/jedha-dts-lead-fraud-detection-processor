@@ -47,7 +47,15 @@ def payment_row(payment_data: dict) -> dict:
 
 
 def validate_payment(payment_data: dict) -> list[str]:
-    """Return the validation errors; an empty list means the payment is valid."""
+    """Return the validation errors; an empty list means the payment is valid.
+    ValidationError returned by Pydantic model_validate looks like
+        {
+        "type": "greater_than_equal",
+        "loc": ("cc_num",),
+        "msg": "Input should be greater than or equal to 100000000000",
+        "ctx": {"ge": 100000000000},
+        }
+    """
     try:
         row = payment_row(payment_data)
     except (KeyError, TypeError, ValueError) as exc:

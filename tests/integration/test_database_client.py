@@ -125,7 +125,7 @@ def test_failure_is_saved_counted_then_replayed():
             assert failure.status == "pending"
             assert trans_num in {f.source_trans_num for f in database_client.get_pending_failures(session)}
 
-            database_client.mark_replayed(session, trans_num)
+            database_client.mark_pending_failure_replayed(session, trans_num)
             session.flush()
             assert failure.status == "replayed"
             assert failure.replayed_at is not None

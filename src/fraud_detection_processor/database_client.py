@@ -48,8 +48,15 @@ class DatabaseClient:
         before: datetime,
     ) -> pd.DataFrame:
         """Previous transactions of the card (by pseudonym), before the payment."""
+        history_columns = (
+            Transaction.card_id,
+            Transaction.amt,
+            Transaction.is_fraud,
+            Transaction.trans_date_trans_time,
+        )
+
         statement = (
-            select(Transaction)
+            select(*history_columns)
             .where(
                 Transaction.card_id == card_id,
                 Transaction.trans_date_trans_time < before,
@@ -57,25 +64,13 @@ class DatabaseClient:
             .order_by(Transaction.trans_date_trans_time.asc())
         )
 
-        columns = [
-            Transaction.card_id.key,
-            Transaction.amt.key,
-            Transaction.is_fraud.key,
-            Transaction.trans_date_trans_time.key,
-        ]
-
-        return pd.DataFrame(
-            [
-                {
-                    Transaction.card_id.key: transaction.card_id,
-                    Transaction.amt.key: float(transaction.amt),
-                    Transaction.is_fraud.key: transaction.is_fraud,
-                    Transaction.trans_date_trans_time.key: transaction.trans_date_trans_time,
-                }
-                for transaction in session.scalars(statement).all()
-            ],
-            columns=columns,
+        history = pd.DataFrame(
+            # Driver convert types to python types, then pandas convert python types to pandas data types
+            session.execute(statement).all(),
+            columns=[column.key for column in history_columns],
         )
+        history[Transaction.amt.key] = history[Transaction.amt.key].astype(float)
+        return history
 
     def get_model_version(
         self,
@@ -151,7 +146,7 @@ class DatabaseClient:
         )
         return list(session.scalars(statement).all())
 
-    def mark_replayed(self, session: Session, source_trans_num: str) -> None:
+    def mark_pending_failure_replayed(self, session: Session, source_trans_num: str) -> None:
         """Close the failure of a payment, if there is one."""
         failure = session.scalar(
             select(FailedPayment).where(

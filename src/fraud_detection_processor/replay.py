@@ -49,7 +49,7 @@ def main() -> None:
         # Already stored in the meantime: nothing more to replay
         if outcome == "duplicate":
             with database_client.SessionLocal() as session:
-                database_client.mark_replayed(session, failure.source_trans_num)
+                database_client.mark_pending_failure_replayed(session, failure.source_trans_num)
                 session.commit()
 
         logger.info("Payment %s: %s", failure.source_trans_num, outcome)
